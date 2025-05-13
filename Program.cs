@@ -1,139 +1,90 @@
-﻿using Chunky.Logic;
+﻿using System.CommandLine;
+using Chunky.dlls;
+using System;
 
 namespace Chunky
 {
     internal class Program
     {
-        static void Main(string[] args)
+        static async Task<int> Main(string[] args)
         {
-            Console.OutputEncoding = System.Text.Encoding.UTF8;
+            var rootCommand = new RootCommand("chunky - file splitter and combiner");
 
-            if (args.Length == 0) { ConsoleEx.Error("Invalid argument!"); return; }
-            else
+            #region Global Options
+            var verboseFlag = new Option<bool>("--verbose", "Enable verbose output");
+
+            rootCommand.AddGlobalOption(verboseFlag);
+            #endregion
+
+            #region Split
+            var splitSource = new Option<FileInfo>(["--source", "-s"], "Source file to split") { IsRequired = true };
+            var splitDestination = new Option<DirectoryInfo?>(["--destination", "-d"], "Output folder");
+            var splitBlockSize = new Option<string>(["--block-size", "-bs"], "Block size (e.g., 10MB)") { IsRequired = true };
+
+            var splitCommand = new Command("split", "Split a file into chunks")
             {
-                if (args.Contains("-t") && args.Contains("-f")) { ConsoleEx.Error("Invalid argument! You cannot use both functions at the same time."); return; }
-                else if (args.Contains("-t"))
-                {
-                    if (args.Length != 4) { ConsoleEx.Error("Invalid parameters."); return; }
+                splitSource,
+                splitDestination,
+                splitBlockSize
+            };
 
-                    string sourceFile = string.Empty; string destinationFolder = string.Empty; long blockSize;
-
-                    if (!isExist(args[1], true, out sourceFile)) { ConsoleEx.Error("Source file doesn't exist!"); return; }
-                    if (!isExist(args[2], false, out destinationFolder))
-                    {
-                        try
-                        {
-                            Directory.CreateDirectory(args[2]);
-
-                            destinationFolder = Path.GetFullPath(args[2]);
-
-                            ConsoleEx.Info($"Directory created with next name: {destinationFolder}");
-                        }
-                        catch (Exception ex)
-                        {
-                            ConsoleEx.Error($"Folder creation is failed with next message:\n{ex.Message}\nMaking a new one...");
-
-                            string? _dirName = Path.GetDirectoryName(Path.GetFullPath(sourceFile));
-
-                            if (string.IsNullOrEmpty(_dirName))
-                            {
-                                ConsoleEx.Error("Cannot specify the parent folder.");
-                                return;
-                            }
-
-                            do
-                            {
-                                destinationFolder = Path.Combine(_dirName, Guid.NewGuid().ToString());
-                            } while (Directory.Exists(destinationFolder));
-
-                            Directory.CreateDirectory(destinationFolder);
-
-                            ConsoleEx.Info($"Directory created with next name: {destinationFolder}");
-                        }
-                    }
-
-                    try
-                    {
-                        blockSize = Convert.ToInt64(string.Join("", args[3].Where(Char.IsDigit)));
-                    }
-                    catch { ConsoleEx.Error("Cannot parse size of blocks."); return; }
-
-                    switch (string.Join("", args[3].Where(Char.IsLetter)).ToLower())
-                    {
-                        case "bytes":
-                            break;
-                        case "kb":
-                            blockSize *= (long)Math.Pow(2, 10);
-                            break;
-                        case "mb":
-                            blockSize *= (long)Math.Pow(2, 20);
-                            break;
-                        case "gb":
-                            blockSize *= (long)Math.Pow(2, 30);
-                            break;
-                        default:
-                            ConsoleEx.Error("Cannot parse size of blocks.");
-                            return; 
-                    }
-
-                    TF tf = new();
-
-                    var result = tf.To_ManyFiles(sourceFile, destinationFolder, blockSize);
-
-                    if (result.status)
-                        ConsoleEx.Info($"Created {result.amount} files.");
-                    else
-                    {
-                        ConsoleEx.Error($"{result.reason}");
-                    }
-                }
-                else if (args.Contains("-f"))
-                {
-                    if (args.Length != 3) { ConsoleEx.Error("Invalid parameters."); return; }
-
-                    string sourceFolder = string.Empty; string destinationFile = string.Empty;
-
-                    if (!isExist(args[1], false, out sourceFolder)) { ConsoleEx.Error("Path to directory doesn't exist!"); return; }
-                    if (isExist(args[2], true, out destinationFile)) { ConsoleEx.Error("A file with the same name already exists! Change this name or delete the file."); return; }
-
-                    TF tf = new();
-
-                    try { tf.From_ManyFiles(sourceFolder, Path.GetFullPath(args[2])); ConsoleEx.Info("Succeed!"); }
-                    catch (Exception ex) { ConsoleEx.Error(ex.Message); return; }
-                }
-                else ConsoleEx.Error("Invalid arguments.");
-            }
-
-            bool isExist(string path, bool isFile, out string fullPath)
+            splitCommand.SetHandler((FileInfo source, DirectoryInfo? dest, string blockSizeRaw, bool verbose) =>
             {
-                path = Path.GetFullPath(path);
-                if (isFile)
+                if (!source.Exists)
                 {
-                    if (Path.Exists(path) && File.Exists(path))
-                    {
-                        fullPath = path;
-                        return true;
-                    }
-                    else
-                    {
-                        fullPath = string.Empty;
-                        return false;
-                    }
+                    ConsoleEx.Error("Source file doesn't exist.");
+                    return;
                 }
-                else
+
+                string destinationDir = dest?.FullName ?? Path.Combine(Path.GetDirectoryName(source.FullName)!, Guid.NewGuid().ToString());
+                Directory.CreateDirectory(destinationDir);
+
+                var options = new ChunkyOptions
                 {
-                    if (Path.Exists(path) && Directory.Exists(path))
-                    {
-                        fullPath = path;
-                        return true;
-                    }
-                    else
-                    {
-                        fullPath = string.Empty;
-                        return false;
-                    }
-                }
-            }
+                    Verbose = verbose,
+                    DeleteChunksAfterJoin = true,
+                    Identifier = ChunkHeader.Magic
+                };
+
+                var engine = new ChunkyEngine(options);
+                bool result = engine.Split(source.FullName, destinationDir, HelperUtility.ParseBlockSize(blockSizeRaw));
+
+                if (result) ConsoleEx.Info("Split successful.");
+            }, splitSource, splitDestination, splitBlockSize, verboseFlag);
+            #endregion
+
+            #region Join
+            var joinSource = new Option<DirectoryInfo>(["--source", "-s"], "Folder with chunks") { IsRequired = true };
+            var joinDestination = new Option<FileInfo>(["--destination", "-d"], "Output file") { IsRequired = true };
+
+            var joinCommand = new Command("join", "Combine chunks into one file")
+            {
+                joinSource,
+                joinDestination
+            };
+
+            joinCommand.SetHandler((DirectoryInfo source, FileInfo dest, bool verbose) =>
+            {
+                if (!source.Exists) { ConsoleEx.Error("Source folder does not exist."); return; }
+                if (dest.Exists) { ConsoleEx.Error("Destination file already exists."); return; }
+
+                var options = new ChunkyOptions
+                {
+                    Verbose = verbose,
+                    DeleteChunksAfterJoin = true,
+                    Identifier = ChunkHeader.Magic
+                };
+
+                var engine = new ChunkyEngine(options);
+                bool result = engine.Join(source.FullName, dest.FullName);
+                if (result) ConsoleEx.Info("Join completed.");
+            }, joinSource, joinDestination, verboseFlag);
+            #endregion
+
+            rootCommand.Add(splitCommand);
+            rootCommand.Add(joinCommand);
+
+            return await rootCommand.InvokeAsync(args);
         }
     }
 }
