@@ -19,40 +19,35 @@ namespace Chunky.dlls
         public bool Split(string sourceFile, string destinationFolder, long blockSizeBytes)
         {
             byte[] buffer = new byte[_options.BufferSize];
+
+            byte[] magicBytes = Encoding.ASCII.GetBytes(_options.Identifier);
+            if (magicBytes.Length != 8)
+                throw new Exception("Magic must be exactly 8 bytes.");
+
             int index = 0;
             List<string> files = new();
 
             try
             {
-                using FileStream sourceStream = new(sourceFile, FileMode.Open, FileAccess.Read);
-                int totalChunks = (int)Math.Ceiling((double)sourceStream.Length / blockSizeBytes);
+                using FileStream sourceStream = new(sourceFile, FileMode.Open, FileAccess.Read);                
 
                 while (sourceStream.Position < sourceStream.Length)
                 {
-                    long chunkSize = Math.Min(blockSizeBytes, sourceStream.Length - sourceStream.Position);
-                    byte[] data;
-                    using (var ms = new MemoryStream())
+                    long bytesLeft = sourceStream.Length - sourceStream.Position;
+                    long chunkSize = Math.Min(blockSizeBytes, bytesLeft);
+
+                    using MemoryStream chunk = new();
+                    chunk.Write(BitConverter.GetBytes(index++));
+                    chunk.Write(magicBytes);
+
+                    long copied = 0;
+                    while (copied < chunkSize)
                     {
-                        long copied = 0;
-                        while (copied < chunkSize)
-                        {
-                            int read = sourceStream.Read(buffer, 0, (int)Math.Min(_options.BufferSize, chunkSize - copied));
-                            if (read == 0) break;
-                            ms.Write(buffer, 0, read);
-                            copied += read;
-                        }
-                        data = ms.ToArray();
+                        int read = sourceStream.Read(buffer, 0, (int)Math.Min(_options.BufferSize, chunkSize - copied));
+                        if (read == 0) break;
+                        chunk.Write(buffer, 0, read);
+                        copied += read;
                     }
-
-                    var header = new ChunkHeader
-                    {
-                        Index = index++,
-                        Identifier = _options.Identifier,
-                        TotalChunks = totalChunks
-                    };
-
-                    if (_options.Verbose)
-                        ConsoleEx.Info($"Header -> index={header.Index}, id={header.Identifier}, total={header.TotalChunks}");
 
                     string pathToFile;
                     do
@@ -60,15 +55,11 @@ namespace Chunky.dlls
                         pathToFile = Path.Combine(destinationFolder, Guid.NewGuid().ToString());
                     } while (File.Exists(pathToFile));
 
-                    using var fileStream = new FileStream(pathToFile, FileMode.CreateNew);
-                    var headerBytes = header.ToBytes();
-                    fileStream.Write(headerBytes, 0, headerBytes.Length);
-                    fileStream.Write(data, 0, data.Length);
+                    File.WriteAllBytes(pathToFile, chunk.ToArray());
+                    files.Add(pathToFile);
 
                     if (_options.Verbose)
                         ConsoleEx.Info($"Written chunk: {Path.GetFileName(pathToFile)}");
-
-                    files.Add(pathToFile);
                 }
 
                 return true;
@@ -84,18 +75,38 @@ namespace Chunky.dlls
         }
         public bool Join(string sourceFolder, string destinationFile)
         {
+            byte[] magicBytes = Encoding.ASCII.GetBytes(_options.Identifier);
+
             byte[] buffer = new byte[_options.BufferSize];
-            RSA? rsa = _options.DecryptionPrivateKey;
 
-            var files = Directory.GetFiles(sourceFolder, "*", SearchOption.TopDirectoryOnly)                
-                .Select(path => new { Path = path, Header = ReadHeader(path) })
-                .Where(x => x.Header != null && x.Header.Identifier.Trim() == _options.Identifier)
-                .OrderBy(x => x.Header!.Index)
-                .ToList();
+            var files = Directory.GetFiles(sourceFolder, "*.*", SearchOption.AllDirectories)
+                .Where(path =>
+                {
+                    using (FileStream fs = new(path, FileMode.Open, FileAccess.Read))
+                    {
+                        byte[] indexBytes = new byte[4];
+                        byte[] magicTest = new byte[8];
 
-            ConsoleEx.Info($"Found {files.Count} chunk(s) matching identifier: {_options.Identifier}");
+                        if (fs.Length < 12) return false;
+                        fs.ReadExactly(indexBytes, 0, 4);
+                        fs.ReadExactly(magicTest, 0, 8);
 
-            if (files.Count == 0)
+                        return magicTest.SequenceEqual(magicBytes);
+                    }
+                })
+                .OrderBy(path =>
+                {
+                    using (FileStream fs = new(path, FileMode.Open, FileAccess.Read))
+                    {
+                        byte[] indexBytes = new byte[4];
+                        fs.ReadExactly(indexBytes, 0, 4);
+                        return BitConverter.ToInt32(indexBytes);
+                    }
+                });
+
+            ConsoleEx.Info($"Found {files.Count()} chunk(s) matching identifier: {_options.Identifier}");
+
+            if (files.Count() == 0)
             {
                 ConsoleEx.Error("No valid chunks found.");
                 return false;
@@ -103,48 +114,30 @@ namespace Chunky.dlls
 
             try
             {
-                using var output = new FileStream(destinationFile, FileMode.Create, FileAccess.Write, FileShare.None);
+                using FileStream destination = new(destinationFile, FileMode.CreateNew, FileAccess.Write);
 
                 foreach (var file in files)
                 {
-                    if (_options.Verbose)
-                        ConsoleEx.Info($"Appending chunk: {Path.GetFileName(file.Path)}");
+                    ConsoleEx.Info($"Appending chunk: {Path.GetFileName(file)}");
 
-                    using (FileStream fs = new FileStream(file.Path, FileMode.Open, FileAccess.Read))
+                    using (FileStream fs = new(file, FileMode.Open, FileAccess.Read))
                     {
-                        fs.Seek(ChunkHeader.Size, SeekOrigin.Begin);
+                        fs.Position = 12;
 
                         int read;
                         while ((read = fs.Read(buffer, 0, buffer.Length)) > 0)
-                        {
-                            byte[] raw = buffer[..read];
-                            output.Write(raw, 0, raw.Length);
-                        }
+                            destination.Write(buffer, 0, read);
                     }
 
-                    if (_options.DeleteChunksAfterJoin)
-                        File.Delete(file.Path);
+                    File.Delete(file);
                 }
 
-                output.Flush(true);
                 return true;
             }
             catch (Exception ex)
             {
                 ConsoleEx.Error($"Join failed: {ex.Message}");
                 return false;
-            }
-        }
-        private ChunkHeader? ReadHeader(string path)
-        {
-            try
-            {
-                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
-                return fs.Length >= ChunkHeader.Size ? ChunkHeader.FromStream(fs) : null;
-            }
-            catch
-            {
-                return null;
             }
         }
     }

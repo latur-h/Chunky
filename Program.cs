@@ -42,12 +42,29 @@ namespace Chunky
                 var options = new ChunkyOptions
                 {
                     Verbose = verbose,
-                    DeleteChunksAfterJoin = true,
-                    Identifier = ChunkHeader.Magic
+                    DeleteChunksAfterJoin = true
                 };
 
                 var engine = new ChunkyEngine(options);
-                bool result = engine.Split(source.FullName, destinationDir, HelperUtility.ParseBlockSize(blockSizeRaw));
+
+                long blockSizeLength = 0;
+                try
+                {
+                    blockSizeLength = HelperUtility.ParseBlockSize(blockSizeRaw);
+                }
+                catch (Exception ex)
+                {
+                    ConsoleEx.Error($"{ex.Message}");
+                    return;
+                }
+
+                if (blockSizeLength > int.MaxValue)
+                {
+                    ConsoleEx.Error($"Block size cannot exceed 2GB because of .NET limitations, set a smaller one.");
+                    return;
+                }
+
+                bool result = engine.Split(source.FullName, destinationDir, blockSizeLength);
 
                 if (result) ConsoleEx.Info("Split successful.");
             }, splitSource, splitDestination, splitBlockSize, verboseFlag);
@@ -71,8 +88,7 @@ namespace Chunky
                 var options = new ChunkyOptions
                 {
                     Verbose = verbose,
-                    DeleteChunksAfterJoin = true,
-                    Identifier = ChunkHeader.Magic
+                    DeleteChunksAfterJoin = true
                 };
 
                 var engine = new ChunkyEngine(options);
