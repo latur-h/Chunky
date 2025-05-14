@@ -19,7 +19,7 @@ namespace Chunky
             #region Split
             var splitSource = new Option<FileInfo>(["--source", "-s"], "Source file to split") { IsRequired = true };
             var splitDestination = new Option<DirectoryInfo?>(["--destination", "-d"], "Output folder");
-            var splitBlockSize = new Option<string>(["--block-size", "-bs"], "Block size (e.g., 10MB)") { IsRequired = true };
+            var splitBlockSize = new Option<string>(["--block-size", "-bs"], "Block size (e.g., 10MB)") { IsRequired = true };            
 
             var splitCommand = new Command("split", "Split a file into chunks")
             {
@@ -36,13 +36,23 @@ namespace Chunky
                     return;
                 }
 
-                string destinationDir = dest?.FullName ?? Path.Combine(Path.GetDirectoryName(source.FullName)!, Guid.NewGuid().ToString());
+                string destinationDir = string.Empty;
+
+                if (dest is null)
+                    do
+                    {
+                        destinationDir = Path.Combine(Path.GetDirectoryName(source.FullName)!, Guid.NewGuid().ToString());
+                    } while (Directory.Exists(destinationDir));
+                else
+                {
+                    destinationDir = dest.FullName;
+                }
+
                 Directory.CreateDirectory(destinationDir);
 
                 var options = new ChunkyOptions
                 {
-                    Verbose = verbose,
-                    DeleteChunksAfterJoin = true
+                    Verbose = verbose
                 };
 
                 var engine = new ChunkyEngine(options);
@@ -73,6 +83,7 @@ namespace Chunky
             #region Join
             var joinSource = new Option<DirectoryInfo>(["--source", "-s"], "Folder with chunks") { IsRequired = true };
             var joinDestination = new Option<FileInfo>(["--destination", "-d"], "Output file") { IsRequired = true };
+            var splitChunkDeletion = new Option<bool>(["--delete-chunks", "-dc"], "Delete chunks after join");
 
             var joinCommand = new Command("join", "Combine chunks into one file")
             {
@@ -80,7 +91,7 @@ namespace Chunky
                 joinDestination
             };
 
-            joinCommand.SetHandler((DirectoryInfo source, FileInfo dest, bool verbose) =>
+            joinCommand.SetHandler((DirectoryInfo source, FileInfo dest, bool verbose, bool deleteChunks) =>
             {
                 if (!source.Exists) { ConsoleEx.Error("Source folder does not exist."); return; }
                 if (dest.Exists) { ConsoleEx.Error("Destination file already exists."); return; }
@@ -88,13 +99,13 @@ namespace Chunky
                 var options = new ChunkyOptions
                 {
                     Verbose = verbose,
-                    DeleteChunksAfterJoin = true
+                    DeleteChunksAfterJoin = deleteChunks
                 };
 
                 var engine = new ChunkyEngine(options);
                 bool result = engine.Join(source.FullName, dest.FullName);
                 if (result) ConsoleEx.Info("Join completed.");
-            }, joinSource, joinDestination, verboseFlag);
+            }, joinSource, joinDestination, verboseFlag, splitChunkDeletion);
             #endregion
 
             rootCommand.Add(splitCommand);

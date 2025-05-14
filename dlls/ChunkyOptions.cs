@@ -11,9 +11,6 @@ namespace Chunky.dlls
     internal class ChunkyOptions
     {
         internal string Identifier = "chunkyoo";
-        internal bool EnableEncryption { get; set; } = false;
-        internal RSA? EncryptionPublicKey { get; set; }
-        internal RSA? DecryptionPrivateKey { get; set; }
         internal bool DeleteChunksAfterJoin { get; set; } = true;
         public bool Verbose { get; set; } = true;
 

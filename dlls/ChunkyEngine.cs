@@ -129,7 +129,8 @@ namespace Chunky.dlls
                             destination.Write(buffer, 0, read);
                     }
 
-                    File.Delete(file);
+                    if (_options.DeleteChunksAfterJoin)
+                        File.Delete(file);
                 }
 
                 return true;
