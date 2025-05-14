@@ -1,4 +1,5 @@
-﻿using System;
+﻿using ShellProgressBar;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
@@ -27,39 +28,54 @@ namespace Chunky.dlls
             int index = 0;
             List<string> files = new();
 
+            using ProgressBar summaryBar = new(100, $"Progress", _options.PBarOptions);
+
             try
             {
-                using FileStream sourceStream = new(sourceFile, FileMode.Open, FileAccess.Read);                
+                using FileStream sourceStream = new(sourceFile, FileMode.Open, FileAccess.Read);
+
+                Threshold summaryThreshold = new(sourceStream.Length, 5);
 
                 while (sourceStream.Position < sourceStream.Length)
                 {
-                    long bytesLeft = sourceStream.Length - sourceStream.Position;
-                    long chunkSize = Math.Min(blockSizeBytes, bytesLeft);
-
-                    using MemoryStream chunk = new();
-                    chunk.Write(BitConverter.GetBytes(index++));
-                    chunk.Write(magicBytes);
-
-                    long copied = 0;
-                    while (copied < chunkSize)
-                    {
-                        int read = sourceStream.Read(buffer, 0, (int)Math.Min(_options.BufferSize, chunkSize - copied));
-                        if (read == 0) break;
-                        chunk.Write(buffer, 0, read);
-                        copied += read;
-                    }
+                    using ChildProgressBar? chunkBar = _options.Verbose ? summaryBar.Spawn(100, $"", _options.PBarChildOptions) : null;
 
                     string pathToFile;
                     do
                     {
                         pathToFile = Path.Combine(destinationFolder, Guid.NewGuid().ToString());
                     } while (File.Exists(pathToFile));
-
-                    File.WriteAllBytes(pathToFile, chunk.ToArray());
                     files.Add(pathToFile);
 
-                    if (_options.Verbose)
-                        ConsoleEx.Info($"Written chunk: {Path.GetFileName(pathToFile)}");
+                    long bytesLeft = sourceStream.Length - sourceStream.Position;
+                    long chunkSize = Math.Min(blockSizeBytes, bytesLeft);
+
+                    Threshold chunkThreshold = new(Math.Min(blockSizeBytes, bytesLeft), 5);
+                    using (FileStream chunk = new(pathToFile, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        chunk.Write(BitConverter.GetBytes(index++));
+                        chunk.Write(magicBytes);
+
+                        long copied = 0;
+                        while (copied < chunkSize)
+                        {
+                            int read = (int)Math.Min(_options.BufferSize, chunkSize - copied);
+                            sourceStream.ReadExactly(buffer, 0, read);
+
+                            if (read == 0) break;
+                            chunk.Write(buffer, 0, read);
+                            copied += read;
+
+                            if (_options.Verbose && chunkThreshold.TryAdvance(read, out int chunkPercent))
+                            {
+                                string fileName = Path.GetFileName(pathToFile);
+                                string shortName = fileName.Length > 20 ? fileName.Substring(0, 17) + "..." : fileName.PadRight(20);
+                                chunkBar?.Tick(chunkPercent, $"Processing chunk {shortName}");
+                            }
+                            if (summaryThreshold.TryAdvance(read, out int summaryPercent))
+                                summaryBar.Tick(summaryPercent, "Progress");
+                        }
+                    }
                 }
 
                 return true;
@@ -102,9 +118,9 @@ namespace Chunky.dlls
                         fs.ReadExactly(indexBytes, 0, 4);
                         return BitConverter.ToInt32(indexBytes);
                     }
-                });
+                }).Select(x => new FileInfo(x));
 
-            ConsoleEx.Info($"Found {files.Count()} chunk(s) matching identifier: {_options.Identifier}");
+            ConsoleEx.Info($"Found {files.Count()} chunk(s)");
 
             if (files.Count() == 0)
             {
@@ -114,23 +130,39 @@ namespace Chunky.dlls
 
             try
             {
+                using ProgressBar summaryBar = new(100, $"Progress", _options.PBarOptions);
+                long length = files.Sum(x => x.Length);
+                Threshold summaryThreshold = new(length, 5);
+
                 using FileStream destination = new(destinationFile, FileMode.CreateNew, FileAccess.Write);
 
                 foreach (var file in files)
                 {
-                    ConsoleEx.Info($"Appending chunk: {Path.GetFileName(file)}");
+                    ChildProgressBar? chunkBar = _options.Verbose ? summaryBar.Spawn(100, "Progress", _options.PBarChildOptions) : null;
+                    Threshold chunkThreshold = new(file.Length, 5);
 
-                    using (FileStream fs = new(file, FileMode.Open, FileAccess.Read))
+                    using (FileStream fs = new(file.FullName, FileMode.Open, FileAccess.Read))
                     {
                         fs.Position = 12;
 
                         int read;
                         while ((read = fs.Read(buffer, 0, buffer.Length)) > 0)
+                        {
                             destination.Write(buffer, 0, read);
+
+                            if (_options.Verbose && chunkThreshold.TryAdvance(read, out int chunkPercent))
+                            {
+                                chunkBar?.Tick(chunkPercent, $"Appending chunk: {file.Name}");
+                            }
+                            if (summaryThreshold.TryAdvance(read, out int summaryPercent))
+                            {
+                                summaryBar.Tick(summaryPercent, "Progress");
+                            }
+                        }
                     }
 
                     if (_options.DeleteChunksAfterJoin)
-                        File.Delete(file);
+                        file.Delete();
                 }
 
                 return true;
